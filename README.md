@@ -49,7 +49,7 @@ VyvoTTS provides a unified tokenizer that works with both Qwen3 and LFM2 models.
 #### Tokenizer Usage
 
 ```python
-from vyvotts.unified_tokenizer import process_dataset
+from vyvotts.audio_tokenizer import process_dataset
 
 # For Qwen3
 process_dataset(
