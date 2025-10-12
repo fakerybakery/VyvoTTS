@@ -55,10 +55,7 @@ class VyvoTTSInference:
         self.PAD_TOKEN = self.config['PAD_TOKEN']
         self.AUDIO_TOKENS_START = self.config['AUDIO_TOKENS_START']
         
-        # For compatibility with existing code
-        self.AUDIO_MARKER_TOKEN = self.AUDIO_TOKENS_START
-        self.STOP_TOKEN_ID = self.END_OF_SPEECH
-        self.AUDIO_OFFSET = self.AUDIO_TOKENS_START
+        # Initialize models
         self.model_name = model_name
         self.engine = LLM(model=model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -66,7 +63,7 @@ class VyvoTTSInference:
 
     def _extract_audio_tokens(self, generated_ids: torch.Tensor) -> torch.Tensor:
         """Extract audio tokens from generated sequence."""
-        token_indices = (generated_ids == self.AUDIO_MARKER_TOKEN).nonzero(as_tuple=True)
+        token_indices = (generated_ids == self.START_OF_SPEECH).nonzero(as_tuple=True)
 
         if len(token_indices[1]) > 0:
             last_occurrence_idx = token_indices[1][-1].item()
@@ -75,7 +72,7 @@ class VyvoTTSInference:
 
     def _clean_tokens(self, tokens: torch.Tensor) -> List[torch.Tensor]:
         """Remove stop tokens and prepare for processing."""
-        return [row[row != self.STOP_TOKEN_ID] for row in tokens]
+        return [row[row != self.END_OF_SPEECH] for row in tokens]
 
     def _group_and_offset_codes(self, processed_rows: List[torch.Tensor]) -> List[List[int]]:
         """Group tokens into groups of 7 and apply offset correction."""
@@ -85,7 +82,7 @@ class VyvoTTSInference:
             row_length = row.size(0)
             new_length = (row_length // self.CODES_PER_GROUP) * self.CODES_PER_GROUP
             trimmed_row = row[:new_length]
-            code_lists.append([t.item() - self.AUDIO_OFFSET for t in trimmed_row])
+            code_lists.append([t.item() - self.AUDIO_TOKENS_START for t in trimmed_row])
 
         return code_lists
 
@@ -169,7 +166,7 @@ class VyvoTTSInference:
             temperature=0.6,
             top_p=0.8,
             max_tokens=1200,
-            stop_token_ids=[self.STOP_TOKEN_ID],
+            stop_token_ids=[self.END_OF_SPEECH],
             repetition_penalty=1.3
         )
 
