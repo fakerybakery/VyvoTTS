@@ -309,7 +309,7 @@ training_args = TrainingArguments(
     fsdp_config={
         "fsdp_offload_params": True,  # Offload params to CPU when not in use
         "fsdp_state_dict_type": "FULL_STATE_DICT",
-        "fsdp_transformer_layer_cls_to_wrap": ["GraniteDecoderLayer"],  # Wrap each transformer layer
+        "fsdp_transformer_layer_cls_to_wrap": ["GraniteMoeHybridDecoderLayer"],  # Wrap each transformer layer
         "fsdp_backward_prefetch": "BACKWARD_PRE",
         "fsdp_cpu_ram_efficient_loading": True,
         "fsdp_sync_module_states": True,
