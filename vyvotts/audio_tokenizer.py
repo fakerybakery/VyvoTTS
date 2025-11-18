@@ -240,23 +240,35 @@ def process_dataset(
     AUDIO_TOKENS_START = config['AUDIO_TOKENS_START']
 
     # Download dataset
-    print(f"Downloading dataset: {original_dataset}")
-    snapshot_download(
-        repo_id=original_dataset,
-        repo_type="dataset",
-        revision="main",
-        max_workers=64,
-    )
+    if accelerator.is_main_process:
+        print(f"Downloading dataset: {original_dataset}")
+        snapshot_download(
+            repo_id=original_dataset,
+            repo_type="dataset",
+            revision="main",
+            max_workers=64,
+        )
+
+    # Wait for download to complete
+    accelerator.wait_for_everyone()
 
     # Load dataset
-    print("Loading dataset...")
+    if accelerator.is_main_process:
+        print("Loading dataset...")
     ds = load_dataset(original_dataset, split="train")
     ds_sample_rate = ds[0]["audio"]["sampling_rate"]
 
-    # Load SNAC model
+    # Shard dataset across GPUs for parallel processing
     if accelerator.is_main_process:
-        print(f"Loading SNAC model: hubertsiuzdak/snac_24khz on {accelerator.num_processes} GPU(s)")
+        print(f"Sharding dataset across {accelerator.num_processes} GPU(s)...")
+
+    # Split dataset by process
+    ds = ds.shard(num_shards=accelerator.num_processes, index=accelerator.process_index)
+
+    if accelerator.is_main_process:
+        print(f"Loading SNAC model: hubertsiuzdak/snac_24khz")
         print(f"Batch size: {batch_size} audio files per GPU")
+        print(f"Each GPU will process {len(ds)} examples")
 
     snac_model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz")
     snac_model = snac_model.to(device)
@@ -294,8 +306,7 @@ def process_dataset(
                     codes_lists[original_idx] = batch_codes[batch_idx]
 
             except Exception as e:
-                if accelerator.is_main_process:
-                    print(f"Error processing batch: {e}")
+                print(f"[GPU {accelerator.process_index}] Error processing batch: {e}")
 
         examples["codes_list"] = codes_lists
         return examples
@@ -304,13 +315,16 @@ def process_dataset(
     if accelerator.is_main_process:
         print(f"Tokenizing audio in batches of {batch_size}...")
 
-    with accelerator.main_process_first():
-        ds = ds.map(
-            add_codes_batch,
-            batched=True,
-            batch_size=batch_size,
-            remove_columns=["audio"]
-        )
+    # Each GPU processes its shard independently
+    ds = ds.map(
+        add_codes_batch,
+        batched=True,
+        batch_size=batch_size,
+        remove_columns=["audio"]
+    )
+
+    # Wait for all GPUs to finish processing
+    accelerator.wait_for_everyone()
 
     # Load text tokenizer
     if accelerator.is_main_process:
