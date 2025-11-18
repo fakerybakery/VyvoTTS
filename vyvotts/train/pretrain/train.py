@@ -1,6 +1,6 @@
 import torch
 from datasets import load_dataset
-from transformers import Trainer, TrainingArguments, AutoTokenizer
+from transformers import Trainer, TrainingArguments, AutoTokenizer, AutoModelForCausalLM
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullStateDictConfig
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP, FullStateDictConfig, StateDictType)
@@ -10,7 +10,6 @@ import yaml
 import wandb
 from huggingface_hub import HfApi
 from accelerate import Accelerator
-from liger_kernel.transformers import AutoLigerKernelForCausalLM
 from pathlib import Path
 
 # Get config file path relative to this script
@@ -250,9 +249,9 @@ device = accelerator.device
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
 # Initialize model with proper dtype for Flash Attention 2.0
-model = AutoLigerKernelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    attn_implementation="kernels-community/flash-attn3",
+    attn_implementation="flash_attention_2",
     torch_dtype=torch.bfloat16,
 )
 
