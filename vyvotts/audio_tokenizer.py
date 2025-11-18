@@ -330,15 +330,14 @@ def process_dataset(
     if accelerator.is_main_process:
         print(f"Loading tokenizer: {tokenizer_model}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
-    num_proc = os.cpu_count() - 2
+    num_proc = max(1, (os.cpu_count() - 2) // accelerator.num_processes)
 
     # Filter out failed tokenizations
     if accelerator.is_main_process:
         print("Filtering invalid examples...")
 
-    with accelerator.main_process_first():
-        ds = ds.filter(lambda x: x["codes_list"] is not None)
-        ds = ds.filter(lambda x: len(x["codes_list"]) > 0)
+    ds = ds.filter(lambda x: x["codes_list"] is not None)
+    ds = ds.filter(lambda x: len(x["codes_list"]) > 0)
 
     # Remove duplicate frames
     def remove_duplicate_frames_wrapper(example):
@@ -349,8 +348,7 @@ def process_dataset(
     if accelerator.is_main_process:
         print("Removing duplicate frames...")
 
-    with accelerator.main_process_first():
-        ds = ds.map(remove_duplicate_frames_wrapper, num_proc=num_proc)
+    ds = ds.map(remove_duplicate_frames_wrapper, num_proc=num_proc)
 
     if accelerator.is_main_process:
         print(f"""
