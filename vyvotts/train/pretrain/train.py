@@ -34,6 +34,7 @@ save_steps = config["save_steps"]
 pad_token = config["pad_token"]
 number_processes = config["number_processes"]
 learning_rate = config["learning_rate"]
+max_seq_length = config.get("max_seq_length", 8192)  # Default to 8192 if not specified
 
 # Parse ratio from config (e.g., "2:1" -> 2)
 ratio_str = config["ratio"]
@@ -255,9 +256,13 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
 )
 
+# Enable gradient checkpointing to save VRAM
+model.gradient_checkpointing_enable()
+
 # Initialize model on first GPU to make Flash Attention happy
 if accelerator.is_local_main_process:
     print(f"Pre-initializing model on {device} before FSDP")
+    print("Gradient checkpointing: ENABLED")
 model = model.to(device)
 
 number_add_tokens = 7 * 4096 + 10
@@ -285,16 +290,26 @@ training_args = TrainingArguments(
     overwrite_output_dir=True,
     num_train_epochs=epochs,
     per_device_train_batch_size=batch_size,
+    gradient_accumulation_steps=4,  # Effective batch = 16 * 4 = 64 per GPU
     logging_steps=1,
     bf16=True,
     output_dir=f"./{base_repo_id}",
-    fsdp="auto_wrap",
+    fsdp="full_shard auto_wrap",
+    fsdp_config={
+        "fsdp_offload_params": True,  # Offload params to CPU when not in use
+        "fsdp_state_dict_type": "FULL_STATE_DICT",
+        "fsdp_transformer_layer_cls_to_wrap": ["GraniteDecoderLayer"],  # Wrap each transformer layer
+        "fsdp_backward_prefetch": "BACKWARD_PRE",
+        "fsdp_cpu_ram_efficient_loading": True,
+    },
     report_to="wandb",
     save_steps=save_steps,
     remove_unused_columns=True,
     learning_rate=learning_rate,
     lr_scheduler_type="cosine",
     average_tokens_across_devices=False,
+    max_grad_norm=1.0,  # Gradient clipping for stability
+    gradient_checkpointing=True,  # Enable gradient checkpointing
 )
 
 trainer = FSDPTrainer(

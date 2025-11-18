@@ -4,12 +4,13 @@ tokenizer_name: "ibm-granite/granite-4.0-h-1b-base"
 
 # Training Args
 epochs: 1
-batch_size: 16
-number_processes: 8
+batch_size: 2
+number_processes: 4
 pad_token: 100256  # Granite's PAD token
 save_steps: 12000
 learning_rate: 5.0e-5
 ratio: "2:1"
+max_seq_length: 8192  # Maximum sequence length to prevent OOM (audio can be very long!)
 
 # Datasets
 text_QA_dataset: "mrfakename/MDF-EN-Emilia-YODAS"
