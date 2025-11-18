@@ -1,16 +1,13 @@
 import torch
 from datasets import load_dataset
 from transformers import Trainer, TrainingArguments, AutoTokenizer, AutoModelForCausalLM
-from torch.distributed.fsdp.fully_sharded_data_parallel import FullStateDictConfig
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP, FullStateDictConfig, StateDictType)
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 import yaml
 import wandb
 from huggingface_hub import HfApi
-from accelerate import Accelerator
 from pathlib import Path
+import os
 
 # Get config file path relative to this script
 CONFIG_FILE = Path(__file__).parent.parent.parent / "configs" / "train" / "granite_pretrain.yaml"
@@ -122,7 +119,7 @@ class AlternatingDistributedSampler(DistributedSampler):
         return iter(indices)
 
 
-class FSDPTrainer(Trainer):
+class DeepSpeedTrainer(Trainer):
     def __init__(self, *args, initial_ratio=2, final_ratio=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.repo_id = base_repo_id
@@ -206,17 +203,6 @@ class FSDPTrainer(Trainer):
                     wandb.log({"audio_loss": logs["loss"], "audio_step": self.audio_step})
                     self.audio_step += 1
 
-    def save_model(self, output_dir=None, _internal_call=False):
-        if output_dir is None:
-            output_dir = self.args.output_dir
-        self.save_and_push_model(output_dir)
-
-    def save_and_push_model(self, output_dir):
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, save_policy):
-            cpu_state_dict = self.model.state_dict()
-        self.model.save_pretrained(output_dir, state_dict=cpu_state_dict)
-
 
 def data_collator(features):
     input_ids = [f["input_ids"][:max_seq_length] for f in features]  # Truncate to max_seq_length
@@ -231,6 +217,14 @@ def data_collator(features):
     else:
         labels = [f["labels"][:max_seq_length] for f in features]  # Truncate
 
+    # Debug: Print actual lengths before padding
+    lengths = [len(ids) for ids in input_ids]
+    max_len = max(lengths)
+    print(f"[DEBUG] Batch sizes before padding: min={min(lengths)}, max={max_len}, avg={sum(lengths)/len(lengths):.0f}")
+
+    if max_len > max_seq_length:
+        print(f"[WARNING] Found sequence longer than {max_seq_length}: {max_len} tokens!")
+
     input_ids = torch.nn.utils.rnn.pad_sequence([torch.tensor(
         i, dtype=torch.long) for i in input_ids], batch_first=True, padding_value=pad_token)
     attention_mask = torch.nn.utils.rnn.pad_sequence([torch.tensor(
@@ -238,32 +232,35 @@ def data_collator(features):
     labels = torch.nn.utils.rnn.pad_sequence([torch.tensor(
         l, dtype=torch.long) for l in labels], batch_first=True, padding_value=-100)
 
+    print(f"[DEBUG] Final batch shape: {input_ids.shape}, VRAM allocated: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 
 wandb.init(project=project_name, name=run_name)
 
-# Setup accelerate (this initializes distributed environment)
-accelerator = Accelerator()
-device = accelerator.device
-
+# DeepSpeed will initialize distributed environment automatically
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
 # Initialize model with proper dtype for Flash Attention 2.0
+print("="*60)
+print(f"Loading model: {model_name}")
+
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     attn_implementation="flash_attention_2",
     torch_dtype=torch.bfloat16,
+    low_cpu_mem_usage=True,  # Load efficiently on CPU first
 )
+
+print(f"Model loaded on CPU")
 
 # Enable gradient checkpointing to save VRAM
 model.gradient_checkpointing_enable()
 
-# Initialize model on first GPU to make Flash Attention happy
-if accelerator.is_local_main_process:
-    print(f"Pre-initializing model on {device} before FSDP")
-    print("Gradient checkpointing: ENABLED")
-model = model.to(device)
+print("Gradient checkpointing: ENABLED")
+print("DeepSpeed ZeRO-3 with CPU offload will shard this model across GPUs")
+print("="*60)
 
 number_add_tokens = 7 * 4096 + 10
 new_tokens = [f"<custom_token_{i}>" for i in range(0, number_add_tokens + 1)]
@@ -274,15 +271,31 @@ ds1 = load_dataset(dsn1, split="train")
 ds2 = load_dataset(dsn2, split="train")
 
 # Filter out sequences longer than max_seq_length to prevent OOM
+print("="*60)
 print(f"Filtering sequences longer than {max_seq_length} tokens...")
 print(f"Dataset 1 before filtering: {len(ds1)} examples")
 print(f"Dataset 2 before filtering: {len(ds2)} examples")
+
+# Check some sample lengths before filtering
+sample_lengths_1 = [len(ds1[i]["input_ids"]) for i in range(min(10, len(ds1)))]
+sample_lengths_2 = [len(ds2[i]["input_ids"]) for i in range(min(10, len(ds2)))]
+print(f"Sample lengths from ds1: {sample_lengths_1}")
+print(f"Sample lengths from ds2: {sample_lengths_2}")
 
 ds1 = ds1.filter(lambda x: len(x["input_ids"]) <= max_seq_length)
 ds2 = ds2.filter(lambda x: len(x["input_ids"]) <= max_seq_length)
 
 print(f"Dataset 1 after filtering: {len(ds1)} examples")
 print(f"Dataset 2 after filtering: {len(ds2)} examples")
+
+# Check sample lengths after filtering
+if len(ds1) > 0:
+    sample_lengths_1 = [len(ds1[i]["input_ids"]) for i in range(min(10, len(ds1)))]
+    print(f"Sample lengths from ds1 after filtering: {sample_lengths_1}")
+if len(ds2) > 0:
+    sample_lengths_2 = [len(ds2[i]["input_ids"]) for i in range(min(10, len(ds2)))]
+    print(f"Sample lengths from ds2 after filtering: {sample_lengths_2}")
+print("="*60)
 
 batch_total = batch_size * number_processes
 
@@ -297,36 +310,32 @@ train_dataset = GradualRatioDataset(
     total_steps=total_steps
 )
 
+# DeepSpeed config path
+DEEPSPEED_CONFIG = Path(__file__).parent.parent.parent / "configs" / "train" / "deepspeed_config.json"
+
 training_args = TrainingArguments(
     overwrite_output_dir=True,
     num_train_epochs=epochs,
     per_device_train_batch_size=batch_size,
-    gradient_accumulation_steps=1,  # No accumulation with small batch size
+    gradient_accumulation_steps=4,  # Accumulate to reduce memory pressure
     logging_steps=1,
     bf16=True,
     output_dir=f"./{base_repo_id}",
-    fsdp="full_shard auto_wrap offload",  # Full shard with CPU offload
-    fsdp_config={
-        "fsdp_offload_params": True,  # Offload params to CPU when not in use
-        "fsdp_state_dict_type": "FULL_STATE_DICT",
-        "fsdp_transformer_layer_cls_to_wrap": ["GraniteMoeHybridDecoderLayer"],  # Wrap each transformer layer
-        "fsdp_backward_prefetch": "BACKWARD_PRE",
-        "fsdp_cpu_ram_efficient_loading": True,
-        "fsdp_sync_module_states": True,
-        "fsdp_use_orig_params": False,  # Use flattened params for memory efficiency
-    },
+    deepspeed=str(DEEPSPEED_CONFIG),  # Use DeepSpeed ZeRO-3 with CPU offload
     report_to="wandb",
     save_steps=save_steps,
+    save_strategy="steps",
     remove_unused_columns=True,
     learning_rate=learning_rate,
     lr_scheduler_type="cosine",
-    average_tokens_across_devices=False,
+    warmup_steps=100,
     max_grad_norm=1.0,  # Gradient clipping for stability
     gradient_checkpointing=True,  # Enable gradient checkpointing
-    optim="adamw_torch_fused",  # Use fused AdamW for efficiency
+    dataloader_num_workers=2,  # Use some workers for data loading
+    dataloader_pin_memory=True,
 )
 
-trainer = FSDPTrainer(
+trainer = DeepSpeedTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
@@ -340,9 +349,13 @@ print(f"Starting training with ratio progression: {initial_ratio}:1 -> {final_ra
 print(f"Total steps: {total_steps}")
 print(f"Max sequence length: {max_seq_length} tokens")
 print(f"Batch size per GPU: {batch_size}")
+print(f"Gradient accumulation: 4 steps")
+print(f"Effective batch size per GPU: {batch_size * 4}")
 print(f"Number of GPUs: {number_processes}")
 print(f"Gradient checkpointing: ENABLED")
-print(f"FSDP CPU offload: ENABLED")
+print(f"DeepSpeed ZeRO-3: ENABLED")
+print(f"CPU Offload (params + optimizer): ENABLED")
+print(f"Expected VRAM per GPU: 8-15GB (down from 192GB!)")
 print("="*60)
 
 trainer.train()

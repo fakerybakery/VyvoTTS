@@ -1,9 +1,10 @@
-transformers 
+transformers
 unsloth
 datasets==3.4.1
-wandb 
+wandb
 trl
 accelerate
+deepspeed
 snac
 soundfile
 librosa
