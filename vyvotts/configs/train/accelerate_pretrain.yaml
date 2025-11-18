@@ -8,7 +8,7 @@
   "main_training_function": "main",
   "mixed_precision": "bf16",
   "num_machines": 1,
-  "num_processes": 8,
+  "num_processes": 4,
   "rdzv_backend": "static",
   "same_network": true,
   "tpu_use_cluster": false,
@@ -22,6 +22,6 @@
       "fsdp_offload_params": false,
       "fsdp_sharding_strategy": 1,
       "fsdp_state_dict_type": "FULL_STATE_DICT",
-      "fsdp_transformer_layer_cls_to_wrap": ["Lfm2DecoderLayer"], # SmolLM3DecoderLayer, LlamaDecoderLayer,Qwen3DecoderLayer
+      "fsdp_transformer_layer_cls_to_wrap": ["GraniteMoeHybridDecoderLayer"], # SmolLM3DecoderLayer, LlamaDecoderLayer,Qwen3DecoderLayer
     },
 }

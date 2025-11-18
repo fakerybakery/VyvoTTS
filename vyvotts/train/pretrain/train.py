@@ -14,7 +14,7 @@ from liger_kernel.transformers import AutoLigerKernelForCausalLM
 from pathlib import Path
 
 # Get config file path relative to this script
-CONFIG_FILE = Path(__file__).parent.parent.parent / "configs" / "lfm2_config.yaml"
+CONFIG_FILE = Path(__file__).parent.parent.parent / "configs" / "train" / "granite_pretrain.yaml"
 
 with open(CONFIG_FILE, "r") as file:
     config = yaml.safe_load(file)
