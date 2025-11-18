@@ -317,7 +317,7 @@ training_args = TrainingArguments(
     overwrite_output_dir=True,
     num_train_epochs=epochs,
     per_device_train_batch_size=batch_size,
-    gradient_accumulation_steps=4,  # Accumulate to reduce memory pressure
+    gradient_accumulation_steps=8,  # Increased from 4 since batch_size=1
     logging_steps=1,
     bf16=True,
     output_dir=f"./{base_repo_id}",
@@ -331,6 +331,7 @@ training_args = TrainingArguments(
     warmup_steps=100,
     max_grad_norm=1.0,  # Gradient clipping for stability
     gradient_checkpointing=True,  # Enable gradient checkpointing
+    gradient_checkpointing_kwargs={"use_reentrant": False},  # More memory efficient
     dataloader_num_workers=2,  # Use some workers for data loading
     dataloader_pin_memory=True,
 )
@@ -347,15 +348,16 @@ trainer = DeepSpeedTrainer(
 print("="*60)
 print(f"Starting training with ratio progression: {initial_ratio}:1 -> {final_ratio}:1")
 print(f"Total steps: {total_steps}")
-print(f"Max sequence length: {max_seq_length} tokens")
+print(f"Max sequence length: {max_seq_length} tokens (REDUCED for Mamba)")
 print(f"Batch size per GPU: {batch_size}")
-print(f"Gradient accumulation: 4 steps")
-print(f"Effective batch size per GPU: {batch_size * 4}")
+print(f"Gradient accumulation: 8 steps")
+print(f"Effective batch size per GPU: {batch_size * 8}")
 print(f"Number of GPUs: {number_processes}")
-print(f"Gradient checkpointing: ENABLED")
-print(f"DeepSpeed ZeRO-3: ENABLED")
+print(f"Gradient checkpointing: ENABLED (non-reentrant)")
+print(f"DeepSpeed ZeRO-3: ENABLED (aggressive offload)")
 print(f"CPU Offload (params + optimizer): ENABLED")
-print(f"Expected VRAM per GPU: 8-15GB (down from 192GB!)")
+print(f"NOTE: GraniteMoeHybrid uses Mamba which has quadratic memory in seq_len")
+print(f"Expected VRAM per GPU: 6-12GB with seq_len=4096")
 print("="*60)
 
 trainer.train()
