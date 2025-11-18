@@ -7,7 +7,7 @@ epochs: 1
 batch_size: 1  # Reduced to 1 due to Mamba memory requirements
 number_processes: 4
 pad_token: 100256  # Granite's PAD token
-save_steps: 12000
+save_steps: 300
 learning_rate: 5.0e-5
 ratio: "2:1"
 max_seq_length: 4096  # Reduced from 8192 - Mamba state grows quadratically!
