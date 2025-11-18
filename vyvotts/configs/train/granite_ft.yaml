@@ -1,5 +1,5 @@
 # CHANGE THIS TO YOUR OWN DATASET
-TTS_dataset: "kadirnar/Stephen_Fry-tokenized-granite"
+TTS_dataset: "mrfakename/MDF-EN-Emilia-YODAS"
 
 model_name: "Vyvo/VyvoTTS-Granite-1B-PT"
 
