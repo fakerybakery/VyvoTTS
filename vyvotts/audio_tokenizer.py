@@ -259,7 +259,7 @@ def process_dataset(
         print(f"Batch size: {batch_size} audio files per GPU")
 
     snac_model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz")
-    snac_model = accelerator.prepare(snac_model)
+    snac_model = snac_model.to(device)
     snac_model.eval()
 
     # Define batched processing function
