@@ -120,7 +120,7 @@ def process_dataset(
     Args:
         original_dataset: HuggingFace dataset path to process
         output_dataset: HuggingFace dataset path for output
-        model_type: Model type - either "qwen3" or "lfm2" (default: "qwen3")
+        model_type: Model type - "qwen3", "lfm2", or "granite" (default: "qwen3")
         text_field: Name of text field in dataset (default: "text_scribe")
         target_sample_rate: Target audio sample rate (default: 24000)
     """
@@ -131,8 +131,11 @@ def process_dataset(
     elif model_type == "lfm2":
         tokenizer_model = "LiquidAI/LFM2-350M"
         config_path = "vyvotts/configs/inference/lfm2.yaml"
+    elif model_type == "granite":
+        tokenizer_model = "ibm-granite/granite-4.0-h-1b-base"
+        config_path = "vyvotts/configs/inference/granite.yaml"
     else:
-        raise ValueError(f"Invalid model_type: {model_type}. Must be 'qwen3' or 'lfm2'")
+        raise ValueError(f"Invalid model_type: {model_type}. Must be 'qwen3', 'lfm2', or 'granite'")
 
     # Load configuration
     print(f"Loading config from: {config_path}")
