@@ -324,7 +324,6 @@ training_args = TrainingArguments(
     max_grad_norm=1.0,  # Gradient clipping for stability
     gradient_checkpointing=True,  # Enable gradient checkpointing
     optim="adamw_torch_fused",  # Use fused AdamW for efficiency
-    max_seq_length=max_seq_length,  # Add max sequence length to args
 )
 
 trainer = FSDPTrainer(
