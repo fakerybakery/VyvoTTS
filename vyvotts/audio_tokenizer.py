@@ -6,6 +6,9 @@ from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from snac import SNAC
 from transformers import AutoTokenizer
+from accelerate import Accelerator
+from typing import List
+import numpy as np
 
 
 def load_config(config_path):
@@ -23,7 +26,7 @@ def load_config(config_path):
     return config
 
 
-def tokenise_audio(waveform, snac_model, ds_sample_rate, target_sample_rate, audio_tokens_start):
+def tokenise_audio(waveform, snac_model, ds_sample_rate, target_sample_rate, audio_tokens_start, device="cuda"):
     """
     Tokenize audio waveform using SNAC codec.
 
@@ -33,6 +36,7 @@ def tokenise_audio(waveform, snac_model, ds_sample_rate, target_sample_rate, aud
         ds_sample_rate: Original dataset sample rate
         target_sample_rate: Target sample rate (24000)
         audio_tokens_start: Offset for audio tokens
+        device: Device to use for processing
 
     Returns:
         List of audio token IDs with proper offsets applied
@@ -44,7 +48,7 @@ def tokenise_audio(waveform, snac_model, ds_sample_rate, target_sample_rate, aud
     # Resample to target sample rate if needed
     resample_transform = T.Resample(orig_freq=ds_sample_rate, new_freq=target_sample_rate)
     waveform = resample_transform(waveform)
-    waveform = waveform.unsqueeze(0).to("cuda")
+    waveform = waveform.unsqueeze(0).to(device)
 
     # Generate SNAC codes
     with torch.inference_mode():
@@ -72,6 +76,82 @@ def tokenise_audio(waveform, snac_model, ds_sample_rate, target_sample_rate, aud
         all_codes.append(codes[2][0][4*i + 3].item() + audio_tokens_start + (6 * 4096))
 
     return all_codes
+
+
+def tokenise_audio_batch(waveforms: List, snac_model, ds_sample_rate, target_sample_rate, audio_tokens_start, device="cuda"):
+    """
+    Tokenize a batch of audio waveforms using SNAC codec for efficient GPU utilization.
+
+    Args:
+        waveforms: List of audio arrays from dataset
+        snac_model: SNAC model instance
+        ds_sample_rate: Original dataset sample rate
+        target_sample_rate: Target sample rate (24000)
+        audio_tokens_start: Offset for audio tokens
+        device: Device to use for processing
+
+    Returns:
+        List of lists of audio token IDs with proper offsets applied
+    """
+    if not waveforms:
+        return []
+
+    # Convert all waveforms to tensors and resample
+    resampler = T.Resample(orig_freq=ds_sample_rate, new_freq=target_sample_rate)
+    processed_waveforms = []
+
+    for waveform in waveforms:
+        waveform = torch.from_numpy(waveform).unsqueeze(0)
+        waveform = waveform.to(dtype=torch.float32)
+        waveform = resampler(waveform)
+        processed_waveforms.append(waveform)
+
+    # Find max length for padding
+    max_len = max(w.shape[-1] for w in processed_waveforms)
+
+    # Pad all waveforms to same length
+    padded_waveforms = []
+    original_lengths = []
+
+    for waveform in processed_waveforms:
+        original_lengths.append(waveform.shape[-1])
+        if waveform.shape[-1] < max_len:
+            padding = max_len - waveform.shape[-1]
+            waveform = torch.nn.functional.pad(waveform, (0, padding))
+        padded_waveforms.append(waveform)
+
+    # Stack into batch
+    batch = torch.stack(padded_waveforms).to(device)
+
+    # Generate SNAC codes for entire batch
+    with torch.inference_mode():
+        codes = snac_model.encode(batch)
+
+    # Process each item in batch
+    all_results = []
+    for batch_idx in range(len(waveforms)):
+        all_codes = []
+        num_frames = codes[0].shape[1]
+
+        for i in range(num_frames):
+            # Level 0: 1 code per frame
+            all_codes.append(codes[0][batch_idx][i].item() + audio_tokens_start)
+
+            # Level 1: 2 codes per frame
+            all_codes.append(codes[1][batch_idx][2*i].item() + audio_tokens_start + 4096)
+
+            # Level 2: 4 codes per frame
+            all_codes.append(codes[2][batch_idx][4*i].item() + audio_tokens_start + (2 * 4096))
+            all_codes.append(codes[2][batch_idx][4*i + 1].item() + audio_tokens_start + (3 * 4096))
+
+            # Continue level 1 and 2 interleaving
+            all_codes.append(codes[1][batch_idx][2*i + 1].item() + audio_tokens_start + (4 * 4096))
+            all_codes.append(codes[2][batch_idx][4*i + 2].item() + audio_tokens_start + (5 * 4096))
+            all_codes.append(codes[2][batch_idx][4*i + 3].item() + audio_tokens_start + (6 * 4096))
+
+        all_results.append(all_codes)
+
+    return all_results
 
 
 def remove_duplicate_frames(codes_list):
@@ -112,10 +192,12 @@ def process_dataset(
     output_dataset,
     model_type="qwen3",
     text_field="text_scribe",
-    target_sample_rate=24000
+    target_sample_rate=24000,
+    batch_size=8
 ):
     """
     Process dataset: tokenize audio and text, create training sequences.
+    Uses Accelerate for multi-GPU support and batch processing for efficiency.
 
     Args:
         original_dataset: HuggingFace dataset path to process
@@ -123,7 +205,11 @@ def process_dataset(
         model_type: Model type - "qwen3", "lfm2", or "granite" (default: "qwen3")
         text_field: Name of text field in dataset (default: "text_scribe")
         target_sample_rate: Target audio sample rate (default: 24000)
+        batch_size: Number of audio files to process per batch (default: 8)
     """
+    # Initialize Accelerate
+    accelerator = Accelerator()
+    device = accelerator.device
     # Set tokenizer and config based on model type
     if model_type == "qwen3":
         tokenizer_model = "Qwen/Qwen3-0.6B"
@@ -168,45 +254,77 @@ def process_dataset(
     ds_sample_rate = ds[0]["audio"]["sampling_rate"]
 
     # Load SNAC model
-    print("Loading SNAC model: hubertsiuzdak/snac_24khz")
+    if accelerator.is_main_process:
+        print(f"Loading SNAC model: hubertsiuzdak/snac_24khz on {accelerator.num_processes} GPU(s)")
+        print(f"Batch size: {batch_size} audio files per GPU")
+
     snac_model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz")
-    snac_model = snac_model.to("cuda")
+    snac_model = accelerator.prepare(snac_model)
+    snac_model.eval()
 
-    # Define processing functions
-    def add_codes(example):
-        """Add audio codes to dataset example."""
-        codes_list = None
+    # Define batched processing function
+    def add_codes_batch(examples):
+        """Add audio codes to a batch of dataset examples."""
+        batch_waveforms = []
+        batch_indices = []
 
-        try:
-            audio_data = example.get("audio")
+        # Collect valid audio samples
+        for idx, audio_data in enumerate(examples.get("audio", [])):
             if audio_data and "array" in audio_data:
-                audio_array = audio_data["array"]
-                codes_list = tokenise_audio(
-                    audio_array,
+                batch_waveforms.append(audio_data["array"])
+                batch_indices.append(idx)
+
+        # Initialize codes_list for all examples
+        codes_lists = [None] * len(examples.get("audio", []))
+
+        # Process batch if we have valid waveforms
+        if batch_waveforms:
+            try:
+                batch_codes = tokenise_audio_batch(
+                    batch_waveforms,
                     snac_model,
                     ds_sample_rate,
                     target_sample_rate,
-                    AUDIO_TOKENS_START
+                    AUDIO_TOKENS_START,
+                    device
                 )
-        except Exception as e:
-            print(f"Skipping row due to error: {e}")
 
-        example["codes_list"] = codes_list
-        return example
+                # Map results back to original indices
+                for batch_idx, original_idx in enumerate(batch_indices):
+                    codes_lists[original_idx] = batch_codes[batch_idx]
 
-    # Process dataset: tokenize audio
-    print("Tokenizing audio...")
-    ds = ds.map(add_codes, remove_columns=["audio"])
+            except Exception as e:
+                if accelerator.is_main_process:
+                    print(f"Error processing batch: {e}")
+
+        examples["codes_list"] = codes_lists
+        return examples
+
+    # Process dataset: tokenize audio with batching
+    if accelerator.is_main_process:
+        print(f"Tokenizing audio in batches of {batch_size}...")
+
+    with accelerator.main_process_first():
+        ds = ds.map(
+            add_codes_batch,
+            batched=True,
+            batch_size=batch_size,
+            remove_columns=["audio"]
+        )
 
     # Load text tokenizer
-    print(f"Loading tokenizer: {tokenizer_model}")
+    if accelerator.is_main_process:
+        print(f"Loading tokenizer: {tokenizer_model}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
     num_proc = os.cpu_count() - 2
 
     # Filter out failed tokenizations
-    print("Filtering invalid examples...")
-    ds = ds.filter(lambda x: x["codes_list"] is not None)
-    ds = ds.filter(lambda x: len(x["codes_list"]) > 0)
+    if accelerator.is_main_process:
+        print("Filtering invalid examples...")
+
+    with accelerator.main_process_first():
+        ds = ds.filter(lambda x: x["codes_list"] is not None)
+        ds = ds.filter(lambda x: len(x["codes_list"]) > 0)
 
     # Remove duplicate frames
     def remove_duplicate_frames_wrapper(example):
@@ -214,10 +332,14 @@ def process_dataset(
         example["codes_list"] = remove_duplicate_frames(example["codes_list"])
         return example
 
-    print("Removing duplicate frames...")
-    ds = ds.map(remove_duplicate_frames_wrapper, num_proc=num_proc)
+    if accelerator.is_main_process:
+        print("Removing duplicate frames...")
 
-    print(f"""
+    with accelerator.main_process_first():
+        ds = ds.map(remove_duplicate_frames_wrapper, num_proc=num_proc)
+
+    if accelerator.is_main_process:
+        print(f"""
 NOTE: Text prompt customization
 You can modify the text prompt in create_input_ids() below.
 For multispeaker models, ensure your dataset has a "source" field.
@@ -261,19 +383,28 @@ For multispeaker models, ensure your dataset has a "source" field.
         return example
 
     # Create final training sequences
-    print("Creating input sequences...")
-    ds = ds.map(
-        create_input_ids,
-        num_proc=num_proc,
-        remove_columns=[text_field, "codes_list"]
-    )
+    if accelerator.is_main_process:
+        print("Creating input sequences...")
+
+    with accelerator.main_process_first():
+        ds = ds.map(
+            create_input_ids,
+            num_proc=num_proc,
+            remove_columns=[text_field, "codes_list"]
+        )
 
     # Keep only training columns
     columns_to_keep = ["input_ids", "labels", "attention_mask"]
     columns_to_remove = [col for col in ds.column_names if col not in columns_to_keep]
-    ds = ds.remove_columns(columns_to_remove)
 
-    # Upload processed dataset
-    print(f"Pushing dataset to: {output_dataset}")
-    ds.push_to_hub(output_dataset)
-    print("Done!")
+    with accelerator.main_process_first():
+        ds = ds.remove_columns(columns_to_remove)
+
+    # Upload processed dataset (only from main process)
+    if accelerator.is_main_process:
+        print(f"Pushing dataset to: {output_dataset}")
+        ds.push_to_hub(output_dataset)
+        print("Done!")
+
+    # Wait for all processes to finish
+    accelerator.wait_for_everyone()

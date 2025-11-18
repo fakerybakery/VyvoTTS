@@ -34,13 +34,20 @@ def prepare_and_process_dataset():
     # Choose model type: "lfm2", "qwen3", or "granite"
     model_type = "granite"
 
+    # Batch size for processing multiple audio files at once per GPU
+    # Increase this to improve GPU utilization (default: 8)
+    # With low VRAM usage (2-4GB), you can safely increase to 16-32
+    batch_size = 16
+
     print(f"\nProcessing with VyvoTTS tokenizer ({model_type.upper()} model)")
     print(f"Input dataset: {source_dataset}")
     print(f"Output dataset: {output_dataset}")
+    print(f"Batch size: {batch_size} audio files per GPU")
 
     # Process using VyvoTTS tokenizer
     # This will:
-    # - Tokenize audio using SNAC codec on CUDA
+    # - Tokenize audio using SNAC codec with multi-GPU support via Accelerate
+    # - Process multiple audio files in batches for better GPU utilization
     # - Tokenize text using the specified model tokenizer
     # - Create training sequences with proper formatting
     # - Push final tokenized dataset to HuggingFace Hub
@@ -49,7 +56,8 @@ def prepare_and_process_dataset():
         output_dataset=output_dataset,
         model_type=model_type,
         text_field="text_scribe",
-        target_sample_rate=24000
+        target_sample_rate=24000,
+        batch_size=batch_size
     )
 
     print("\n" + "="*60)
