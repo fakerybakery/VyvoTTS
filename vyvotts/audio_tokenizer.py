@@ -398,25 +398,66 @@ For multispeaker models, ensure your dataset has a "source" field.
     if accelerator.is_main_process:
         print("Creating input sequences...")
 
-    with accelerator.main_process_first():
-        ds = ds.map(
-            create_input_ids,
-            num_proc=num_proc,
-            remove_columns=[text_field, "codes_list"]
-        )
+    ds = ds.map(
+        create_input_ids,
+        num_proc=num_proc,
+        remove_columns=[text_field, "codes_list"]
+    )
 
     # Keep only training columns
     columns_to_keep = ["input_ids", "labels", "attention_mask"]
     columns_to_remove = [col for col in ds.column_names if col not in columns_to_keep]
+    ds = ds.remove_columns(columns_to_remove)
 
-    with accelerator.main_process_first():
-        ds = ds.remove_columns(columns_to_remove)
+    # Wait for all processes to finish their shard
+    accelerator.wait_for_everyone()
 
-    # Upload processed dataset (only from main process)
+    # Gather all shards and combine them (only on main process)
     if accelerator.is_main_process:
+        print("Gathering processed shards from all GPUs...")
+
+        # Load all shards
+        all_shards = []
+        for i in range(accelerator.num_processes):
+            # Save each shard temporarily
+            shard_path = f"/tmp/vyvotts_shard_{i}"
+            if i == 0:
+                # Main process saves its own shard
+                ds.save_to_disk(shard_path)
+            # Wait for other processes to save
+
+        # Other processes save their shards
+    else:
+        shard_path = f"/tmp/vyvotts_shard_{accelerator.process_index}"
+        ds.save_to_disk(shard_path)
+
+    # Wait for all saves to complete
+    accelerator.wait_for_everyone()
+
+    # Main process combines and uploads
+    if accelerator.is_main_process:
+        from datasets import concatenate_datasets
+
+        all_shards = []
+        for i in range(accelerator.num_processes):
+            shard_path = f"/tmp/vyvotts_shard_{i}"
+            shard = load_dataset("arrow", data_files={"train": f"{shard_path}/data-*.arrow"}, split="train")
+            all_shards.append(shard)
+
+        # Combine all shards
+        print(f"Combining {len(all_shards)} shards...")
+        combined_ds = concatenate_datasets(all_shards)
+
         print(f"Pushing dataset to: {output_dataset}")
-        ds.push_to_hub(output_dataset)
+        combined_ds.push_to_hub(output_dataset)
         print("Done!")
+
+        # Cleanup temporary files
+        import shutil
+        for i in range(accelerator.num_processes):
+            shard_path = f"/tmp/vyvotts_shard_{i}"
+            if os.path.exists(shard_path):
+                shutil.rmtree(shard_path)
 
     # Wait for all processes to finish
     accelerator.wait_for_everyone()
