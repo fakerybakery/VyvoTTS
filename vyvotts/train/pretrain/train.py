@@ -219,17 +219,17 @@ class FSDPTrainer(Trainer):
 
 
 def data_collator(features):
-    input_ids = [f["input_ids"] for f in features]
+    input_ids = [f["input_ids"][:max_seq_length] for f in features]  # Truncate to max_seq_length
 
     if any("attention_mask" not in f for f in features):
         attention_mask = [[1]*len(ids) for ids in input_ids]
     else:
-        attention_mask = [f["attention_mask"] for f in features]
+        attention_mask = [f["attention_mask"][:max_seq_length] for f in features]  # Truncate
 
     if any("labels" not in f for f in features):
         labels = input_ids
     else:
-        labels = [f["labels"] for f in features]
+        labels = [f["labels"][:max_seq_length] for f in features]  # Truncate
 
     input_ids = torch.nn.utils.rnn.pad_sequence([torch.tensor(
         i, dtype=torch.long) for i in input_ids], batch_first=True, padding_value=pad_token)
@@ -273,6 +273,17 @@ model.resize_token_embeddings(len(tokenizer))
 ds1 = load_dataset(dsn1, split="train")
 ds2 = load_dataset(dsn2, split="train")
 
+# Filter out sequences longer than max_seq_length to prevent OOM
+print(f"Filtering sequences longer than {max_seq_length} tokens...")
+print(f"Dataset 1 before filtering: {len(ds1)} examples")
+print(f"Dataset 2 before filtering: {len(ds2)} examples")
+
+ds1 = ds1.filter(lambda x: len(x["input_ids"]) <= max_seq_length)
+ds2 = ds2.filter(lambda x: len(x["input_ids"]) <= max_seq_length)
+
+print(f"Dataset 1 after filtering: {len(ds1)} examples")
+print(f"Dataset 2 after filtering: {len(ds2)} examples")
+
 batch_total = batch_size * number_processes
 
 # Calculate total steps for the dataset
@@ -290,17 +301,19 @@ training_args = TrainingArguments(
     overwrite_output_dir=True,
     num_train_epochs=epochs,
     per_device_train_batch_size=batch_size,
-    gradient_accumulation_steps=4,  # Effective batch = 16 * 4 = 64 per GPU
+    gradient_accumulation_steps=1,  # No accumulation with small batch size
     logging_steps=1,
     bf16=True,
     output_dir=f"./{base_repo_id}",
-    fsdp="full_shard auto_wrap",
+    fsdp="full_shard auto_wrap offload",  # Full shard with CPU offload
     fsdp_config={
         "fsdp_offload_params": True,  # Offload params to CPU when not in use
         "fsdp_state_dict_type": "FULL_STATE_DICT",
         "fsdp_transformer_layer_cls_to_wrap": ["GraniteDecoderLayer"],  # Wrap each transformer layer
         "fsdp_backward_prefetch": "BACKWARD_PRE",
         "fsdp_cpu_ram_efficient_loading": True,
+        "fsdp_sync_module_states": True,
+        "fsdp_use_orig_params": False,  # Use flattened params for memory efficiency
     },
     report_to="wandb",
     save_steps=save_steps,
@@ -310,6 +323,8 @@ training_args = TrainingArguments(
     average_tokens_across_devices=False,
     max_grad_norm=1.0,  # Gradient clipping for stability
     gradient_checkpointing=True,  # Enable gradient checkpointing
+    optim="adamw_torch_fused",  # Use fused AdamW for efficiency
+    max_seq_length=max_seq_length,  # Add max sequence length to args
 )
 
 trainer = FSDPTrainer(
@@ -321,7 +336,14 @@ trainer = FSDPTrainer(
     final_ratio=final_ratio
 )
 
+print("="*60)
 print(f"Starting training with ratio progression: {initial_ratio}:1 -> {final_ratio}:1")
 print(f"Total steps: {total_steps}")
+print(f"Max sequence length: {max_seq_length} tokens")
+print(f"Batch size per GPU: {batch_size}")
+print(f"Number of GPUs: {number_processes}")
+print(f"Gradient checkpointing: ENABLED")
+print(f"FSDP CPU offload: ENABLED")
+print("="*60)
 
 trainer.train()
